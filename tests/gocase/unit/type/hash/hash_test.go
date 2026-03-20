@@ -37,7 +37,7 @@ import (
 )
 
 func getKeys(hash map[string]string) []string {
-	r := make([]string, 0)
+	r := make([]string, 0, len(hash))
 	for key := range hash {
 		r = append(r, key)
 	}
@@ -45,7 +45,7 @@ func getKeys(hash map[string]string) []string {
 }
 
 func getVals(hash map[string]string) []string {
-	r := make([]string, 0)
+	r := make([]string, 0, len(hash))
 	for _, val := range hash {
 		r = append(r, val)
 	}
@@ -275,14 +275,14 @@ var testHash = func(t *testing.T, configs util.KvrocksServerConfigs) {
 	})
 
 	t.Run("HGET against non existing key", func(t *testing.T) {
-		var rv []string
+		rv := make([]string, 0, 2)
 		rv = append(rv, rdb.HGet(ctx, "samllhash", "__123123123__").Val())
 		rv = append(rv, rdb.HGet(ctx, "bighash", "__123123123__").Val())
 		require.Equal(t, []string{"", ""}, rv)
 	})
 
 	t.Run("HSET in update and insert mode", func(t *testing.T) {
-		var rv []string
+		rv := make([]string, 0, 8)
 		k := getKeys(smallhash)[0]
 		rv = append(rv, fmt.Sprintf("%d", rdb.HSet(ctx, "smallhash", k, "newval1").Val()))
 		smallhash[k] = "newval1"
@@ -390,7 +390,7 @@ var testHash = func(t *testing.T, configs util.KvrocksServerConfigs) {
 	})
 
 	t.Run("HMSET - small hash", func(t *testing.T) {
-		var args []string
+		args := make([]string, 0, 2*len(smallhash))
 		for key := range smallhash {
 			newval := util.RandString(0, 8, util.Alpha)
 			smallhash[key] = newval
@@ -400,7 +400,7 @@ var testHash = func(t *testing.T, configs util.KvrocksServerConfigs) {
 	})
 
 	t.Run("HMSET - big hash", func(t *testing.T) {
-		var args []string
+		args := make([]string, 0, 2*len(bighash))
 		for key := range bighash {
 			newval := util.RandString(0, 8, util.Alpha)
 			bighash[key] = newval
@@ -410,7 +410,7 @@ var testHash = func(t *testing.T, configs util.KvrocksServerConfigs) {
 	})
 
 	t.Run("HMGET against non existing key and fields", func(t *testing.T) {
-		var rv [][]interface{}
+		rv := make([][]interface{}, 0, 8)
 		cmd1 := rdb.HMGet(ctx, "doesntexist", "__123123123__", "__456456456__")
 		rv = append(rv, cmd1.Val())
 		cmd2 := rdb.HMGet(ctx, "smallhash", "__123123123__", "__456456456__")
@@ -433,8 +433,8 @@ var testHash = func(t *testing.T, configs util.KvrocksServerConfigs) {
 	})
 
 	t.Run("HMGET - small hash", func(t *testing.T) {
-		var keys []string
-		var vals []string
+		keys := make([]string, 0, len(smallhash))
+		vals := make([]string, 0, len(smallhash))
 		for key, val := range smallhash {
 			keys = append(keys, key)
 			vals = append(vals, val)
@@ -451,8 +451,8 @@ var testHash = func(t *testing.T, configs util.KvrocksServerConfigs) {
 	})
 
 	t.Run("HMGET - big hash", func(t *testing.T) {
-		var keys []string
-		var vals []string
+		keys := make([]string, 0, len(bighash))
+		vals := make([]string, 0, len(bighash))
 		for key, val := range bighash {
 			keys = append(keys, key)
 			vals = append(vals, val)
@@ -537,7 +537,7 @@ var testHash = func(t *testing.T, configs util.KvrocksServerConfigs) {
 	})
 
 	t.Run("HDEL and return value", func(t *testing.T) {
-		var rv []string
+		rv := make([]string, 0, 8)
 		rv = append(rv, fmt.Sprintf("%d", rdb.HDel(ctx, "smallhash", "nokey").Val()))
 		rv = append(rv, fmt.Sprintf("%d", rdb.HDel(ctx, "bighash", "nokey").Val()))
 		k := getKeys(smallhash)[0]
@@ -569,7 +569,7 @@ var testHash = func(t *testing.T, configs util.KvrocksServerConfigs) {
 	})
 
 	t.Run("HEXISTS", func(t *testing.T) {
-		var rv []bool
+		rv := make([]bool, 0, 4)
 		k := getKeys(smallhash)[0]
 		rv = append(rv, rdb.HExists(ctx, "smallhash", k).Val())
 		rv = append(rv, rdb.HExists(ctx, "smallhash", "nokey").Val())
@@ -585,7 +585,7 @@ var testHash = func(t *testing.T, configs util.KvrocksServerConfigs) {
 	})
 
 	t.Run("HINCRBY against non existing hash key", func(t *testing.T) {
-		var rv []string
+		rv := make([]string, 0, 4)
 		rdb.HDel(ctx, "smallhash", "tmp")
 		rdb.HDel(ctx, "bighash", "tmp")
 		rv = append(rv, fmt.Sprintf("%d", rdb.HIncrBy(ctx, "smallhash", "tmp", 2).Val()))
@@ -596,7 +596,7 @@ var testHash = func(t *testing.T, configs util.KvrocksServerConfigs) {
 	})
 
 	t.Run("HINCRBY against hash key created by hincrby itself", func(t *testing.T) {
-		var rv []string
+		rv := make([]string, 0, 4)
 		rv = append(rv, fmt.Sprintf("%d", rdb.HIncrBy(ctx, "smallhash", "tmp", 3).Val()))
 		rv = append(rv, rdb.HGet(ctx, "smallhash", "tmp").Val())
 		rv = append(rv, fmt.Sprintf("%d", rdb.HIncrBy(ctx, "bighash", "tmp", 3).Val()))
@@ -685,7 +685,7 @@ var testHash = func(t *testing.T, configs util.KvrocksServerConfigs) {
 	})
 
 	t.Run("HINCRBYFLOAT against hash key originally set with HSET", func(t *testing.T) {
-		var rv []float64
+		rv := make([]float64, 0, 2)
 		rdb.HSet(ctx, "smallhash", "tmp", 100)
 		rdb.HSet(ctx, "bighash", "tmp", 100)
 		rv = append(rv, rdb.HIncrByFloat(ctx, "smallhash", "tmp", 2.5).Val())
@@ -750,7 +750,7 @@ var testHash = func(t *testing.T, configs util.KvrocksServerConfigs) {
 	})
 
 	t.Run("HSTRLEN against non existing field", func(t *testing.T) {
-		var rv []int64
+		rv := make([]int64, 0, 2)
 		rv = append(rv, rdb.Do(ctx, "hstrlen", "smallhash", "__123123123__").Val().(int64))
 		rv = append(rv, rdb.Do(ctx, "hstrlen", "bighash", "__123123123__").Val().(int64))
 		require.Equal(t, []int64{0, 0}, rv)
@@ -960,7 +960,7 @@ var testHash = func(t *testing.T, configs util.KvrocksServerConfigs) {
 			result, err = rdb.HRandField(ctx, "nonexistent-key", 1).Result()
 			require.NoError(t, err)
 			require.Len(t, result, 0)
-			var rv [][]interface{}
+			rv := make([][]interface{}, 0, 6)
 			resultWithValues, err := rdb.HRandFieldWithValues(ctx, testKey, 5).Result()
 			require.NoError(t, err)
 			require.Len(t, resultWithValues, 3)
@@ -989,6 +989,578 @@ var testHash = func(t *testing.T, configs util.KvrocksServerConfigs) {
 			// TODO: Add test to verify randomness of the selected random fields
 		})
 
+		// Hash field expiration tests
+		t.Run("HEXPIRE basic functionality", func(t *testing.T) {
+			testKey := "hexpire-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+			require.NoError(t, rdb.HSet(ctx, testKey, "field1", "value1", "field2", "value2", "field3", "value3").Err())
+
+			// Set expiration on two fields
+			result := rdb.Do(ctx, "HEXPIRE", testKey, "60", "FIELDS", "2", "field1", "field2")
+			require.NoError(t, result.Err())
+			vals, err := result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 2)
+			require.EqualValues(t, 1, vals[0]) // field1 expired successfully
+			require.EqualValues(t, 1, vals[1]) // field2 expired successfully
+		})
+
+		t.Run("HEXPIRE non-existent field", func(t *testing.T) {
+			testKey := "hexpire-test-nonexistent"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+			require.NoError(t, rdb.HSet(ctx, testKey, "field1", "value1").Err())
+
+			result := rdb.Do(ctx, "HEXPIRE", testKey, "60", "FIELDS", "2", "field1", "nonexistent")
+			require.NoError(t, result.Err())
+			vals, err := result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 2)
+			require.EqualValues(t, 1, vals[0])  // field1 expired successfully
+			require.EqualValues(t, -2, vals[1]) // nonexistent field
+		})
+
+		t.Run("HEXPIRE non-existent key", func(t *testing.T) {
+			result := rdb.Do(ctx, "HEXPIRE", "nonexistent-key", "60", "FIELDS", "1", "field1")
+			require.NoError(t, result.Err())
+			vals, err := result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 1)
+			require.EqualValues(t, -2, vals[0]) // key doesn't exist
+		})
+
+		t.Run("HTTL basic functionality", func(t *testing.T) {
+			testKey := "httl-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+			require.NoError(t, rdb.HSet(ctx, testKey, "field1", "value1", "field2", "value2").Err())
+
+			// Initially no TTL
+			result := rdb.Do(ctx, "HTTL", testKey, "FIELDS", "2", "field1", "field2")
+			require.NoError(t, result.Err())
+			vals, err := result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 2)
+			require.EqualValues(t, -1, vals[0]) // no TTL
+			require.EqualValues(t, -1, vals[1]) // no TTL
+
+			// Set expiration
+			rdb.Do(ctx, "HEXPIRE", testKey, "60", "FIELDS", "1", "field1")
+
+			// Check TTL
+			result = rdb.Do(ctx, "HTTL", testKey, "FIELDS", "2", "field1", "field2")
+			require.NoError(t, result.Err())
+			vals, err = result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 2)
+			ttl1, ok := vals[0].(int64)
+			require.True(t, ok)
+			require.GreaterOrEqual(t, ttl1, int64(59)) // TTL should be around 60
+			require.LessOrEqual(t, ttl1, int64(61))
+			require.EqualValues(t, -1, vals[1]) // field2 has no TTL
+
+			result = rdb.Do(ctx, "HPTTL", testKey, "FIELDS", "2", "field1", "field2")
+			require.NoError(t, result.Err())
+			vals, err = result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 2)
+			ttl1, ok = vals[0].(int64)
+			require.True(t, ok)
+			require.GreaterOrEqual(t, ttl1, int64(59000)) // TTL should be around 60
+			require.LessOrEqual(t, ttl1, int64(61000))
+			require.EqualValues(t, -1, vals[1]) // field2 has no TTL
+
+			result = rdb.Do(ctx, "HEXPIRETIME", testKey, "FIELDS", "2", "field1", "field2")
+			require.NoError(t, result.Err())
+			vals, err = result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 2)
+			ttl1, ok = vals[0].(int64)
+			require.True(t, ok)
+			nowTime := time.Now().Unix()
+			require.GreaterOrEqual(t, ttl1-nowTime, int64(59)) // TTL should be around 60
+			require.LessOrEqual(t, ttl1-nowTime, int64(61))
+			require.EqualValues(t, -1, vals[1]) // field2 has no TTL
+
+			result = rdb.Do(ctx, "HPEXPIRETIME", testKey, "FIELDS", "2", "field1", "field2")
+			require.NoError(t, result.Err())
+			vals, err = result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 2)
+			ttl1, ok = vals[0].(int64)
+			require.True(t, ok)
+			nowTime = time.Now().UnixMilli()
+			require.GreaterOrEqual(t, ttl1-nowTime, int64(59000)) // TTL should be around 60
+			require.LessOrEqual(t, ttl1-nowTime, int64(61000))
+			require.EqualValues(t, -1, vals[1]) // field2 has no TTL
+		})
+
+		t.Run("HTTL non-existent field", func(t *testing.T) {
+			testKey := "httl-test-nonexistent"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+			require.NoError(t, rdb.HSet(ctx, testKey, "field1", "value1").Err())
+
+			result := rdb.Do(ctx, "HTTL", testKey, "FIELDS", "2", "field1", "nonexistent")
+			require.NoError(t, result.Err())
+			vals, err := result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 2)
+			require.EqualValues(t, -1, vals[0]) // field1 exists, no TTL
+			require.EqualValues(t, -2, vals[1]) // nonexistent field
+		})
+
+		t.Run("HPERSIST basic functionality", func(t *testing.T) {
+			testKey := "hpersist-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+			require.NoError(t, rdb.HSet(ctx, testKey, "field1", "value1", "field2", "value2").Err())
+
+			// Set expiration
+			rdb.Do(ctx, "HEXPIRE", testKey, "60", "FIELDS", "1", "field1")
+
+			// Remove expiration
+			result := rdb.Do(ctx, "HPERSIST", testKey, "FIELDS", "2", "field1", "field2")
+			require.NoError(t, result.Err())
+			vals, err := result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 2)
+			require.EqualValues(t, 1, vals[0])  // field1 expiration removed
+			require.EqualValues(t, -1, vals[1]) // field2 had no TTL
+
+			// Verify TTL is gone
+			result = rdb.Do(ctx, "HTTL", testKey, "FIELDS", "1", "field1")
+			require.NoError(t, result.Err())
+			vals, err = result.Slice()
+			require.NoError(t, err)
+			require.EqualValues(t, -1, vals[0]) // no TTL
+		})
+
+		t.Run("HPERSIST non-existent field", func(t *testing.T) {
+			testKey := "hpersist-test-nonexistent"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+			require.NoError(t, rdb.HSet(ctx, testKey, "field1", "value1").Err())
+
+			result := rdb.Do(ctx, "HPERSIST", testKey, "FIELDS", "2", "field1", "nonexistent")
+			require.NoError(t, result.Err())
+			vals, err := result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 2)
+			require.EqualValues(t, -1, vals[0]) // field1 exists but no TTL
+			require.EqualValues(t, -2, vals[1]) // nonexistent field
+		})
+
+		t.Run("Expired field is not returned by HGET", func(t *testing.T) {
+			testKey := "hget-expired-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+			require.NoError(t, rdb.HSet(ctx, testKey, "field1", "value1").Err())
+
+			// Set expiration to 1 second
+			rdb.Do(ctx, "HEXPIRE", testKey, "1", "FIELDS", "1", "field1")
+
+			// Wait for expiration
+			time.Sleep(2 * time.Second)
+
+			// Field should be expired
+			val := rdb.HGet(ctx, testKey, "field1")
+			require.Error(t, val.Err())
+		})
+
+		t.Run("HPExpired field is not returned by HGET", func(t *testing.T) {
+			testKey := "hget-hpexpire-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+			require.NoError(t, rdb.HSet(ctx, testKey, "field1", "value1").Err())
+
+			// Set expiration to 1 second
+			rdb.Do(ctx, "HPEXPIRE", testKey, "1000", "FIELDS", "1", "field1")
+
+			// Wait for expiration
+			time.Sleep(2 * time.Second)
+
+			// Field should be expired
+			val := rdb.HGet(ctx, testKey, "field1")
+			require.Error(t, val.Err())
+		})
+
+		t.Run("Expired field is not returned by HGETALL", func(t *testing.T) {
+			testKey := "hgetall-expired-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+			require.NoError(t, rdb.HSet(ctx, testKey, "field1", "value1", "field2", "value2").Err())
+
+			// Set expiration on field1 to 1 second
+			rdb.Do(ctx, "HEXPIRE", testKey, "1", "FIELDS", "1", "field1")
+
+			// Wait for expiration
+			time.Sleep(2 * time.Second)
+
+			// Only field2 should be returned
+			result := rdb.HGetAll(ctx, testKey)
+			require.NoError(t, result.Err())
+			vals := result.Val()
+			require.Len(t, vals, 1)
+			require.Equal(t, "value2", vals["field2"])
+		})
+
+		t.Run("Expire field with conditions XX/NX", func(t *testing.T) {
+			testKey := "hexpire-conditions-test-xx-nx"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+			require.NoError(t, rdb.HSet(ctx, testKey, "field1", "value1").Err())
+
+			// Set expiration only if field has TTL
+			result := rdb.Do(ctx, "HPEXPIRE", testKey, "100", "XX", "FIELDS", "1", "field1")
+			require.NoError(t, result.Err())
+			vals, err := result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 1)
+			require.EqualValues(t, 0, vals[0]) // field1 has no TTL, so not set
+
+			// see if the key expired
+			time.Sleep(120 * time.Millisecond)
+
+			hGetResult := rdb.HGet(ctx, testKey, "field1")
+			require.NoError(t, hGetResult.Err())
+			val, err := hGetResult.Result()
+			require.NoError(t, err)
+			require.EqualValues(t, "value1", val)
+
+			// Set expiration only if field has TTL
+			result = rdb.Do(ctx, "HPEXPIRE", testKey, "100", "NX", "FIELDS", "1", "field1")
+			require.NoError(t, result.Err())
+			vals, err = result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 1)
+			require.EqualValues(t, 1, vals[0]) // field1 has no TTL, so not set
+
+			time.Sleep(120 * time.Millisecond)
+
+			boolResult := rdb.HExists(ctx, testKey, "field1")
+			require.False(t, boolResult.Val())
+		})
+
+		t.Run("Expire field with conditions LT/GT", func(t *testing.T) {
+			testKey := "hexpire-conditions-test-xx-nx"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+			require.NoError(t, rdb.HSet(ctx, testKey, "field1", "value1").Err())
+
+			// Set expiration only if field has TTL
+			result := rdb.Do(ctx, "HPEXPIRE", testKey, "1000", "FIELDS", "1", "field1")
+			require.NoError(t, result.Err())
+			vals, err := result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 1)
+			require.EqualValues(t, 1, vals[0])
+
+			// Set expiration only if field has TTL
+			result = rdb.Do(ctx, "HPEXPIRE", testKey, "1200", "LT", "FIELDS", "1", "field1")
+			require.NoError(t, result.Err())
+			vals, err = result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 1)
+			require.EqualValues(t, 0, vals[0])
+
+			result = rdb.Do(ctx, "HPEXPIRE", testKey, "500", "LT", "FIELDS", "1", "field1")
+			require.NoError(t, result.Err())
+			vals, err = result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 1)
+			require.EqualValues(t, 1, vals[0])
+
+			result = rdb.Do(ctx, "HPEXPIRE", testKey, "400", "GT", "FIELDS", "1", "field1")
+			require.NoError(t, result.Err())
+			vals, err = result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 1)
+			require.EqualValues(t, 0, vals[0])
+
+			result = rdb.Do(ctx, "HPEXPIRE", testKey, "1500", "GT", "FIELDS", "1", "field1")
+			require.NoError(t, result.Err())
+			vals, err = result.Slice()
+			require.NoError(t, err)
+			require.Len(t, vals, 1)
+			require.EqualValues(t, 1, vals[0])
+		})
+
+		t.Run("HSETEX basic functionality", func(t *testing.T) {
+			testKey := "hsetex-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+
+			// Test basic HSETEX with KEEPTTL (no expiration)
+			result := rdb.Do(ctx, "HSETEX", testKey, "KEEPTTL", "FIELDS", "2", "field1", "value1", "field2", "value2")
+			require.NoError(t, result.Err())
+			val, err := result.Int64()
+			require.NoError(t, err)
+			// 1 means all fields set
+			require.EqualValues(t, 1, val)
+
+			// Verify values are set
+			require.Equal(t, "value1", rdb.HGet(ctx, testKey, "field1").Val())
+			require.Equal(t, "value2", rdb.HGet(ctx, testKey, "field2").Val())
+
+			httlResult := rdb.HTTL(ctx, testKey, "field1", "field2")
+			vals, err := httlResult.Result()
+			require.NoError(t, err)
+			require.EqualValues(t, -1, vals[0]) // no ttl found, return -1
+			require.EqualValues(t, -1, vals[1])
+		})
+
+		t.Run("HSETEX with EX (seconds)", func(t *testing.T) {
+			testKey := "hsetex-ex-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+
+			// Set with 10 seconds expiration
+			result := rdb.Do(ctx, "HSETEX", testKey, "EX", "10", "FIELDS", "1", "field1", "value1")
+			require.NoError(t, result.Err())
+			val, err := result.Int64()
+			require.NoError(t, err)
+			require.EqualValues(t, 1, val)
+
+			// Verify value is set
+			require.Equal(t, "value1", rdb.HGet(ctx, testKey, "field1").Val())
+
+			// Verify TTL is approximately 10 seconds
+			ttl := rdb.HTTL(ctx, testKey, "field1").Val()
+			require.Len(t, ttl, 1)
+			require.Greater(t, ttl[0], int64(8))
+			require.LessOrEqual(t, ttl[0], int64(10))
+		})
+
+		t.Run("HSETEX with PX (milliseconds)", func(t *testing.T) {
+			testKey := "hsetex-px-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+
+			// Set with 5000 milliseconds expiration
+			result := rdb.Do(ctx, "HSETEX", testKey, "PX", "5000", "FIELDS", "1", "field1", "value1")
+			require.NoError(t, result.Err())
+			val, err := result.Int64()
+			require.NoError(t, err)
+			require.EqualValues(t, 1, val)
+
+			// Verify value is set
+			require.Equal(t, "value1", rdb.HGet(ctx, testKey, "field1").Val())
+
+			// Verify TTL is approximately 5 seconds
+			ttl := rdb.HPTTL(ctx, testKey, "field1").Val()
+			require.Greater(t, ttl[0], int64(4000))
+			require.LessOrEqual(t, ttl[0], int64(5000))
+		})
+
+		t.Run("HSETEX with EXAT (unix timestamp in seconds)", func(t *testing.T) {
+			testKey := "hsetex-exat-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+
+			// Set with expiration at unix timestamp 10 seconds from now
+			futureTime := time.Now().Add(10 * time.Second).Unix()
+			result := rdb.Do(ctx, "HSETEX", testKey, "EXAT", futureTime, "FIELDS", "1", "field1", "value1")
+			require.NoError(t, result.Err())
+			val, err := result.Int64()
+			require.NoError(t, err)
+			require.EqualValues(t, 1, val)
+
+			// Verify value is set
+			require.Equal(t, "value1", rdb.HGet(ctx, testKey, "field1").Val())
+
+			// Verify TTL is approximately 10 seconds
+			ttl := rdb.HTTL(ctx, testKey, "field1").Val()
+			require.Greater(t, ttl[0], int64(8))
+			require.LessOrEqual(t, ttl[0], int64(10))
+		})
+
+		t.Run("HSETEX with PXAT (unix timestamp in milliseconds)", func(t *testing.T) {
+			testKey := "hsetex-pxat-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+
+			// Set with expiration at unix timestamp 5000 milliseconds from now
+			futureTime := time.Now().Add(5000 * time.Millisecond).UnixMilli()
+			result := rdb.Do(ctx, "HSETEX", testKey, "PXAT", futureTime, "FIELDS", "1", "field1", "value1")
+			require.NoError(t, result.Err())
+			val, err := result.Int64()
+			require.NoError(t, err)
+			require.EqualValues(t, 1, val)
+
+			// Verify value is set
+			require.Equal(t, "value1", rdb.HGet(ctx, testKey, "field1").Val())
+
+			// Verify TTL is approximately 5 seconds
+			ttl := rdb.HPTTL(ctx, testKey, "field1").Val()
+			require.Len(t, ttl, 1)
+			require.Greater(t, ttl[0], int64(4000))
+			require.LessOrEqual(t, ttl[0], int64(5000))
+		})
+
+		t.Run("HSETEX with FNX (only set if field doesn't exist)", func(t *testing.T) {
+			testKey := "hsetex-fnx-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+
+			// First set with FNX should succeed
+			result := rdb.Do(ctx, "HSETEX", testKey, "KEEPTTL", "FNX", "FIELDS", "1", "field1", "value1")
+			require.NoError(t, result.Err())
+			val, err := result.Int64()
+			require.NoError(t, err)
+			require.EqualValues(t, 1, val)
+
+			// Second set with FNX on same field should return 0 (not updated)
+			result = rdb.Do(ctx, "HSETEX", testKey, "KEEPTTL", "FNX", "FIELDS", "1", "field1", "value2")
+			require.NoError(t, result.Err())
+			val, err = result.Int64()
+			require.NoError(t, err)
+			require.EqualValues(t, 0, val)
+
+			// Verify original value is unchanged
+			require.Equal(t, "value1", rdb.HGet(ctx, testKey, "field1").Val())
+		})
+
+		t.Run("HSETEX with FXX (only set if field exists)", func(t *testing.T) {
+			testKey := "hsetex-fxx-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+
+			// First set with FXX should fail (field doesn't exist)
+			result := rdb.Do(ctx, "HSETEX", testKey, "KEEPTTL", "FXX", "FIELDS", "1", "field1", "value1")
+			require.NoError(t, result.Err())
+			val, err := result.Int64()
+			require.NoError(t, err)
+			require.EqualValues(t, 0, val)
+
+			// Set the field first
+			require.NoError(t, rdb.HSet(ctx, testKey, "field1", "original").Err())
+
+			// Now FXX should succeed
+			result = rdb.Do(ctx, "HSETEX", testKey, "KEEPTTL", "FXX", "FIELDS", "1", "field1", "updated")
+			require.NoError(t, result.Err())
+			val, err = result.Int64()
+			require.NoError(t, err)
+			require.EqualValues(t, 0, val) // FXX returns 0 for updates on existing fields
+
+			// Verify value is updated
+			require.Equal(t, "updated", rdb.HGet(ctx, testKey, "field1").Val())
+		})
+
+		t.Run("HSETEX with multiple field-value pairs", func(t *testing.T) {
+			testKey := "hsetex-multi-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+
+			// Set multiple fields with EX option
+			result := rdb.Do(ctx, "HSETEX", testKey, "EX", "10", "FIELDS", "3",
+				"field1", "value1", "field2", "value2", "field3", "value3")
+			require.NoError(t, result.Err())
+			val, err := result.Int64()
+			require.NoError(t, err)
+			require.EqualValues(t, 1, int64(val))
+
+			// Verify all values are set
+			require.Equal(t, "value1", rdb.HGet(ctx, testKey, "field1").Val())
+			require.Equal(t, "value2", rdb.HGet(ctx, testKey, "field2").Val())
+			require.Equal(t, "value3", rdb.HGet(ctx, testKey, "field3").Val())
+		})
+
+		t.Run("HSETEX with FNX and EX combination", func(t *testing.T) {
+			testKey := "hsetex-fnx-ex-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+
+			// Set with FNX and EX
+			result := rdb.Do(ctx, "HSETEX", testKey, "EX", "10", "FNX", "FIELDS", "2",
+				"field1", "value1", "field2", "value2")
+			require.NoError(t, result.Err())
+			val, err := result.Int64()
+			require.NoError(t, err)
+			require.EqualValues(t, 1, int64(val))
+
+			// Verify values are set
+			require.Equal(t, "value1", rdb.HGet(ctx, testKey, "field1").Val())
+			require.Equal(t, "value2", rdb.HGet(ctx, testKey, "field2").Val())
+
+			// Verify TTL is set
+			ttl := rdb.HTTL(ctx, testKey, "field1", "field2").Val()
+			require.Len(t, ttl, 2)
+			require.Greater(t, ttl[0], int64(8))
+			require.LessOrEqual(t, ttl[0], int64(10))
+			require.Greater(t, ttl[1], int64(8))
+			require.LessOrEqual(t, ttl[1], int64(10))
+		})
+
+		t.Run("HSETEX with FXX and PX combination", func(t *testing.T) {
+			testKey := "hsetex-fxx-px-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+
+			// Set initial values
+			require.NoError(t, rdb.HSet(ctx, testKey, "field1", "original", "field2", "original").Err())
+
+			// Update with FXX and PX
+			result := rdb.Do(ctx, "HSETEX", testKey, "PX", "5000", "FXX", "FIELDS", "2",
+				"field1", "updated1", "field2", "updated2")
+			require.NoError(t, result.Err())
+			val, err := result.Int64()
+			require.NoError(t, err)
+			require.EqualValues(t, 0, val)
+
+			// Verify values are updated
+			require.Equal(t, "updated1", rdb.HGet(ctx, testKey, "field1").Val())
+			require.Equal(t, "updated2", rdb.HGet(ctx, testKey, "field2").Val())
+
+			// Verify TTL is set
+			ttl := rdb.HPTTL(ctx, testKey, "field1", "field2").Val()
+			require.Len(t, ttl, 2)
+			require.Greater(t, ttl[0], int64(4000))
+			require.LessOrEqual(t, ttl[0], int64(5000))
+			require.Greater(t, ttl[1], int64(4000))
+			require.LessOrEqual(t, ttl[1], int64(5000))
+		})
+
+		t.Run("HSETEX error cases", func(t *testing.T) {
+			testKey := "hsetex-error-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+
+			// Invalid expiration value (EX must be positive)
+			result := rdb.Do(ctx, "HSETEX", testKey, "EX", "0", "FIELDS", "1", "field1", "value1")
+			require.Error(t, result.Err())
+
+			// Missing FIELDS keyword
+			result = rdb.Do(ctx, "HSETEX", testKey, "EX", "10", "1", "field1", "value1")
+			require.Error(t, result.Err())
+
+			// Invalid numfields
+			result = rdb.Do(ctx, "HSETEX", testKey, "EX", "10", "FIELDS", "wrong", "field1", "value1")
+			require.Error(t, result.Err())
+
+			// Mismatched field-value pairs
+			result = rdb.Do(ctx, "HSETEX", testKey, "KEEPTTL", "FIELDS", "2", "field1", "value1")
+			require.Error(t, result.Err())
+		})
+
+		t.Run("HEXPIRE/HTTL/HPERSIST wrong arguments", func(t *testing.T) {
+			testKey := "wrong-args-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+			require.NoError(t, rdb.HSet(ctx, testKey, "field1", "value1").Err())
+
+			// HEXPIRE without FIELDS keyword
+			result := rdb.Do(ctx, "HEXPIRE", testKey, "60", "WRONG", "1", "field1")
+			require.Error(t, result.Err())
+
+			// HTTL without FIELDS keyword
+			result = rdb.Do(ctx, "HTTL", testKey, "WRONG", "1", "field1")
+			require.Error(t, result.Err())
+
+			// HPERSIST without FIELDS keyword
+			result = rdb.Do(ctx, "HPERSIST", testKey, "WRONG", "1", "field1")
+			require.Error(t, result.Err())
+
+			// Wrong number of fields
+			result = rdb.Do(ctx, "HEXPIRE", testKey, "60", "FIELDS", "3", "field1", "field2")
+			require.Error(t, result.Err())
+		})
+
+		t.Run("HASH COMPACT", func(t *testing.T) {
+			testKey := "hash-compact-test"
+			require.NoError(t, rdb.Del(ctx, testKey).Err())
+			require.NoError(t, rdb.HSet(ctx, testKey, "field1", "value1").Err())
+
+			// Set expiration to 300 ms
+			rdb.Do(ctx, "HPEXPIRE", testKey, 300, "FIELDS", "1", "field1")
+
+			// Wait for expiration
+			time.Sleep(350 * time.Millisecond)
+
+			// Field should be expired
+			val := rdb.HGet(ctx, testKey, "field1")
+			require.Error(t, val.Err())
+
+			require.NoError(t, rdb.Do(ctx, "COMPACT").Err())
+		})
 	}
 }
 

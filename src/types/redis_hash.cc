@@ -28,9 +28,14 @@
 #include <random>
 #include <utility>
 
+#include "_deps/rocksdb-src/util/string_util.h"
 #include "db_util.h"
+#include "encoding.h"
 #include "parse_util.h"
+#include "rocksdb/slice.h"
 #include "sample_helper.h"
+#include "storage/redis_metadata.h"
+#include "time_util.h"
 
 namespace redis {
 
@@ -40,12 +45,12 @@ rocksdb::Status Hash::GetMetadata(engine::Context &ctx, const Slice &ns_key, Has
 
 rocksdb::Status Hash::Size(engine::Context &ctx, const Slice &user_key, uint64_t *size) {
   *size = 0;
-
-  std::string ns_key = AppendNamespacePrefix(user_key);
-  HashMetadata metadata(false);
-  rocksdb::Status s = GetMetadata(ctx, ns_key, &metadata);
-  if (!s.ok()) return s;
-  *size = metadata.size;
+  std::vector<FieldValue> fields;
+  auto s = this->GetAll(ctx, user_key, &fields, HashFetchType::kOnlyKey);
+  if (!s.ok()) {
+    return s;
+  }
+  *size = fields.size();
   return rocksdb::Status::OK();
 }
 
@@ -56,13 +61,22 @@ rocksdb::Status Hash::Get(engine::Context &ctx, const Slice &user_key, const Sli
   if (!s.ok()) return s;
   rocksdb::ReadOptions read_options;
   std::string sub_key = InternalKey(ns_key, field, metadata.version, storage_->IsSlotIdEncoded()).Encode();
-  return storage_->Get(ctx, ctx.GetReadOptions(), sub_key, value);
+  s = storage_->Get(ctx, ctx.GetReadOptions(), sub_key, value);
+  if (!s.ok()) return s;
+  uint64_t expire_at = NoExpireTime;
+  s = GetSubKeyExpireTimestampMS(ctx, user_key, field, metadata.version, &expire_at);
+  if (!s.ok() && !s.IsNotFound()) return s;
+  if (expire_at != NoExpireTime && expire_at < util::GetTimeStampMS()) {
+    return rocksdb::Status::NotFound();
+  }
+  return rocksdb::Status::OK();
 }
 
 rocksdb::Status Hash::IncrBy(engine::Context &ctx, const Slice &user_key, const Slice &field, int64_t increment,
                              int64_t *new_value) {
   bool exists = false;
   int64_t old_value = 0;
+  bool expired = false;
 
   std::string ns_key = AppendNamespacePrefix(user_key);
 
@@ -76,6 +90,15 @@ rocksdb::Status Hash::IncrBy(engine::Context &ctx, const Slice &user_key, const 
     s = storage_->Get(ctx, ctx.GetReadOptions(), sub_key, &value_bytes);
     if (!s.ok() && !s.IsNotFound()) return s;
     if (s.ok()) {
+      uint64_t expire_at = NoExpireTime;
+      rocksdb::Status expire_s = GetSubKeyExpireTimestampMS(ctx, user_key, field, metadata.version, &expire_at);
+      if (!expire_s.ok() && !expire_s.IsNotFound()) return expire_s;
+      if (expire_at != NoExpireTime && expire_at < util::GetTimeStampMS()) {
+        expired = true;
+        old_value = 0;
+      }
+    }
+    if (s.ok() && !expired) {
       auto parse_result = ParseInt<int64_t>(value_bytes, 10);
       if (!parse_result) {
         return rocksdb::Status::InvalidArgument(parse_result.Msg());
@@ -98,7 +121,14 @@ rocksdb::Status Hash::IncrBy(engine::Context &ctx, const Slice &user_key, const 
   s = batch->PutLogData(log_data.Encode());
   if (!s.ok()) return s;
   s = batch->Put(sub_key, std::to_string(*new_value));
+
+  // if key expired we need to clean the ttl
   if (!s.ok()) return s;
+  if (expired) {
+    auto sub_key_expire = GetSubKeyExpireInternalKey(user_key, field, metadata.version);
+    s = batch->Delete(sub_key_expire);
+    if (!s.ok()) return s;
+  }
   if (!exists) {
     metadata.size += 1;
     std::string bytes;
@@ -113,6 +143,7 @@ rocksdb::Status Hash::IncrByFloat(engine::Context &ctx, const Slice &user_key, c
                                   double *new_value) {
   bool exists = false;
   double old_value = 0;
+  bool expired = false;
 
   std::string ns_key = AppendNamespacePrefix(user_key);
 
@@ -126,6 +157,15 @@ rocksdb::Status Hash::IncrByFloat(engine::Context &ctx, const Slice &user_key, c
     s = storage_->Get(ctx, ctx.GetReadOptions(), sub_key, &value_bytes);
     if (!s.ok() && !s.IsNotFound()) return s;
     if (s.ok()) {
+      uint64_t expire_at = NoExpireTime;
+      rocksdb::Status expire_s = GetSubKeyExpireTimestampMS(ctx, user_key, field, metadata.version, &expire_at);
+      if (!expire_s.ok() && !expire_s.IsNotFound()) return expire_s;
+      if (expire_at != NoExpireTime && expire_at < util::GetTimeStampMS()) {
+        expired = true;
+        old_value = 0;
+      }
+    }
+    if (s.ok() && !expired) {
       auto value_stat = ParseFloat(value_bytes);
       if (!value_stat || isspace(value_bytes[0])) {
         return rocksdb::Status::InvalidArgument("value is not a number");
@@ -146,6 +186,15 @@ rocksdb::Status Hash::IncrByFloat(engine::Context &ctx, const Slice &user_key, c
   if (!s.ok()) return s;
   s = batch->Put(sub_key, std::to_string(*new_value));
   if (!s.ok()) return s;
+
+  // if key expired we need to clean the ttl
+  if (!s.ok()) return s;
+  if (expired) {
+    auto sub_key_expire = GetSubKeyExpireInternalKey(user_key, field, metadata.version);
+    s = batch->Delete(sub_key_expire);
+    if (!s.ok()) return s;
+  }
+
   if (!exists) {
     metadata.size += 1;
     std::string bytes;
@@ -180,6 +229,9 @@ rocksdb::Status Hash::MGet(engine::Context &ctx, const Slice &user_key, const st
     keys.emplace_back(sub_keys[i]);
   }
 
+  std::vector<uint64_t> expire_ats(fields.size(), NoExpireTime);
+  std::vector<rocksdb::Status> expire_statuses(fields.size(), rocksdb::Status::OK());
+  MGetSubKeyExpireTimestampMS(ctx, user_key, fields, metadata.version, &expire_ats, &expire_statuses);
   std::vector<rocksdb::PinnableSlice> values_vector;
   values_vector.resize(keys.size());
   std::vector<rocksdb::Status> statuses_vector;
@@ -188,6 +240,12 @@ rocksdb::Status Hash::MGet(engine::Context &ctx, const Slice &user_key, const st
                      values_vector.data(), statuses_vector.data());
   for (size_t i = 0; i < keys.size(); i++) {
     if (!statuses_vector[i].ok() && !statuses_vector[i].IsNotFound()) return statuses_vector[i];
+    if (!expire_statuses[i].ok() && !expire_statuses[i].IsNotFound()) return expire_statuses[i];
+    if (statuses_vector[i].ok() && expire_ats[i] != 0 && expire_ats[i] < util::GetTimeStampMS()) {
+      values->emplace_back("");
+      statuses->emplace_back(rocksdb::Status::NotFound());
+      continue;
+    }
     values->emplace_back(values_vector[i].ToString());
     statuses->emplace_back(statuses_vector[i]);
   }
@@ -222,7 +280,17 @@ rocksdb::Status Hash::Delete(engine::Context &ctx, const Slice &user_key, const 
     std::string sub_key = InternalKey(ns_key, field, metadata.version, storage_->IsSlotIdEncoded()).Encode();
     s = storage_->Get(ctx, ctx.GetReadOptions(), sub_key, &value);
     if (s.ok()) {
-      *deleted_cnt += 1;
+      uint64_t old_expired_timestamp = NoExpireTime;
+      s = GetSubKeyExpireTimestampMS(ctx, user_key, field, metadata.version, &old_expired_timestamp);
+      if (!s.ok() && !s.IsNotFound()) return s;
+      if (old_expired_timestamp == NoExpireTime || old_expired_timestamp > util::GetTimeStampMS()) {
+        *deleted_cnt += 1;
+      }
+      if (s.ok()) {
+        auto sub_key_expire = GetSubKeyExpireInternalKey(user_key, field, metadata.version);
+        s = batch->Delete(sub_key_expire);
+        if (!s.ok()) return s;
+      }
       s = batch->Delete(sub_key);
       if (!s.ok()) return s;
     }
@@ -259,15 +327,18 @@ rocksdb::Status Hash::MSet(engine::Context &ctx, const Slice &user_key, const st
   std::unordered_set<std::string_view> field_set;
 
   std::vector<rocksdb::Slice> keys;
+  std::vector<rocksdb::Slice> origin_keys;
   std::vector<std::string> keys_encoded;
   std::vector<std::string_view> values;
   keys.reserve(field_values.size());
   values.reserve(field_values.size());
+  origin_keys.reserve(field_values.size());
   for (auto it = field_values.rbegin(); it != field_values.rend(); it++) {
     if (!field_set.insert(it->field).second) {
       continue;
     }
 
+    origin_keys.emplace_back(it->field);
     keys_encoded.push_back(InternalKey(ns_key, it->field, metadata.version, storage_->IsSlotIdEncoded()).Encode());
     keys.emplace_back(keys_encoded.back());
     values.emplace_back(it->value);
@@ -275,27 +346,43 @@ rocksdb::Status Hash::MSet(engine::Context &ctx, const Slice &user_key, const st
 
   std::vector<rocksdb::PinnableSlice> values_vector(keys.size());
   std::vector<rocksdb::Status> statuses_vector(keys.size());
-  if (metadata.size > 0) {
-    rocksdb::ReadOptions read_options = ctx.DefaultMultiGetOptions();
-    storage_->MultiGet(ctx, read_options, storage_->GetDB()->DefaultColumnFamily(), keys.size(), keys.data(),
-                       values_vector.data(), statuses_vector.data());
-  }
+
+  rocksdb::ReadOptions read_options = ctx.DefaultMultiGetOptions();
+  storage_->MultiGet(ctx, read_options, storage_->GetDB()->DefaultColumnFamily(), keys.size(), keys.data(),
+                     values_vector.data(), statuses_vector.data());
+
+  std::vector<uint64_t> expire_ats(field_values.size(), NoExpireTime);
+  std::vector<rocksdb::Status> expire_statuses(field_values.size(), rocksdb::Status::OK());
+  MGetSubKeyExpireTimestampMS(ctx, user_key, origin_keys, metadata.version, &expire_ats, &expire_statuses);
 
   for (size_t field_index = 0; field_index < keys.size(); field_index++) {
     const rocksdb::Slice field_key = keys[field_index];
     bool exists = false;
 
-    if (metadata.size > 0) {
-      rocksdb::Status &field_status = statuses_vector[field_index];
-      if (!field_status.ok() && !field_status.IsNotFound()) {
-        return field_status;
+    rocksdb::Status &field_status = statuses_vector[field_index];
+    if (!field_status.ok() && !field_status.IsNotFound()) {
+      return field_status;
+    }
+    if (field_status.ok()) {
+      if (nx || values_vector[field_index] == values[field_index]) {
+        continue;
       }
-      if (field_status.ok()) {
-        if (nx || values_vector[field_index] == values[field_index]) {
-          continue;
-        }
-        exists = true;
-      }
+
+      exists = true;
+    }
+
+    uint64_t expire_at = expire_ats[field_index];
+    rocksdb::Status &expire_status = expire_statuses[field_index];
+    if (!expire_status.ok() && !expire_status.IsNotFound()) {
+      return expire_status;
+    }
+
+    // try expired as not exists
+    if (expire_at != NoExpireTime && expire_at < util::GetTimeStampMS()) {
+      exists = false;
+      auto sub_key_expire = GetSubKeyExpireInternalKey(user_key, origin_keys[field_index], metadata.version);
+      s = batch->Delete(sub_key_expire);
+      if (!s.ok()) return s;
     }
 
     if (!exists) {
@@ -350,6 +437,8 @@ rocksdb::Status Hash::RangeByLex(engine::Context &ctx, const Slice &user_key, co
       iter->SeekForPrev(start_key);
     }
   }
+
+  auto current_timestamp_ms = util::GetTimeStampMS();
   int64_t pos = 0;
   for (; iter->Valid() && iter->key().starts_with(prefix_key); (!spec.reversed ? iter->Next() : iter->Prev())) {
     InternalKey ikey(iter->key(), storage_->IsSlotIdEncoded());
@@ -369,6 +458,14 @@ rocksdb::Status Hash::RangeByLex(engine::Context &ctx, const Slice &user_key, co
     }
     if (spec.offset >= 0 && pos++ < spec.offset) continue;
 
+    uint64_t expire_at = NoExpireTime;
+    auto s = GetSubKeyExpireTimestampMS(ctx, user_key, ikey.GetSubKey(), metadata.version, &expire_at);
+    if (!s.ok() && !s.IsNotFound()) {
+      return s;
+    }
+    if (expire_at != NoExpireTime && expire_at < current_timestamp_ms) {
+      continue;
+    }
     field_values->emplace_back(ikey.GetSubKey().ToString(), iter->value().ToString());
     if (spec.count > 0 && field_values->size() >= static_cast<unsigned>(spec.count)) break;
   }
@@ -394,13 +491,20 @@ rocksdb::Status Hash::GetAll(engine::Context &ctx, const Slice &user_key, std::v
 
   auto iter = util::UniqueIterator(ctx, read_options);
   for (iter->Seek(prefix_key); iter->Valid() && iter->key().starts_with(prefix_key); iter->Next()) {
+    InternalKey ikey(iter->key(), storage_->IsSlotIdEncoded());
+    uint64_t expire_at = NoExpireTime;
+    s = GetSubKeyExpireTimestampMS(ctx, user_key, ikey.GetSubKey(), metadata.version, &expire_at);
+    if (!s.ok() && !s.IsNotFound()) {
+      return s;
+    }
+    if (expire_at != NoExpireTime && expire_at < util::GetTimeStampMS()) {
+      continue;
+    }
     if (type == HashFetchType::kOnlyKey) {
-      InternalKey ikey(iter->key(), storage_->IsSlotIdEncoded());
       field_values->emplace_back(ikey.GetSubKey().ToString(), "");
     } else if (type == HashFetchType::kOnlyValue) {
       field_values->emplace_back("", iter->value().ToString());
     } else {
-      InternalKey ikey(iter->key(), storage_->IsSlotIdEncoded());
       field_values->emplace_back(ikey.GetSubKey().ToString(), iter->value().ToString());
     }
   }
@@ -451,4 +555,319 @@ rocksdb::Status Hash::RandField(engine::Context &ctx, const Slice &user_key, int
   return rocksdb::Status::OK();
 }
 
+rocksdb::Status Hash::ExpireFields(engine::Context &ctx, const Slice &user_key, uint64_t expireat_ms,
+                                   const std::vector<Slice> &fields, std::vector<FieldExpireResult> *results,
+                                   FieldExpireCondition condition) {
+  results->clear();
+  results->reserve(fields.size());
+
+  std::string ns_key = AppendNamespacePrefix(user_key);
+  HashMetadata metadata(false);
+  rocksdb::Status s = GetMetadata(ctx, ns_key, &metadata);
+  if (!s.ok()) {
+    // Key doesn't exist - all fields don't exist
+    results->assign(fields.size(), FieldExpireResult::kFieldNotFound);
+    return s.IsNotFound() ? rocksdb::Status::OK() : s;
+  }
+
+  auto batch = storage_->GetWriteBatchBase();
+  WriteBatchLogData log_data(kRedisHash);
+  s = batch->PutLogData(log_data.Encode());
+  if (!s.ok()) return s;
+
+  auto current_time_ms = util::GetTimeStampMS();
+  for (const auto &field : fields) {
+    if (current_time_ms >= expireat_ms) {
+      results->push_back(FieldExpireResult::kExpireWithPastTime);
+      continue;
+    }
+    std::string sub_key = InternalKey(ns_key, field, metadata.version, storage_->IsSlotIdEncoded()).Encode();
+    std::string value;
+    s = storage_->Get(ctx, ctx.GetReadOptions(), sub_key, &value);
+
+    if (s.IsNotFound()) {
+      results->push_back(FieldExpireResult::kFieldNotFound);  // Field doesn't exist
+      continue;
+    }
+    if (!s.ok()) return s;
+    uint64_t old_expired_timestamp = NoExpireTime;
+    s = GetSubKeyExpireTimestampMS(ctx, user_key, field, metadata.version, &old_expired_timestamp);
+    if (!s.ok() && !s.IsNotFound()) return s;
+    if (old_expired_timestamp != NoExpireTime && old_expired_timestamp < util::GetTimeStampMS()) {
+      results->push_back(FieldExpireResult::kFieldNotFound);  // Treat as non-existent
+      continue;
+    }
+
+    switch (condition) {
+      case FieldExpireCondition::kFieldNoExpireCondition:
+        break;
+      case FieldExpireCondition::kFieldExpireTimeNotExists:
+        if (old_expired_timestamp != NoExpireTime) {
+          // NX set expiration only when the field has no expiration.
+          results->push_back(FieldExpireResult::kExpireNotSet);
+          continue;
+        }
+        break;
+      case FieldExpireCondition::kFieldExpireTimeExists:
+        if (old_expired_timestamp == NoExpireTime) {
+          // XX set expiration only when the field has an existing expiration.
+          results->push_back(FieldExpireResult::kExpireNotSet);  // No existing expiration
+          continue;
+        }
+        break;
+      case FieldExpireCondition::kFieldExpireTimeGreaterThanInput:
+        if (old_expired_timestamp != NoExpireTime && expireat_ms < old_expired_timestamp) {
+          // GT set expiration only when the new expiration is
+          // greater than current one.
+          results->push_back(FieldExpireResult::kExpireNotSet);
+          continue;
+        }
+        break;
+      case FieldExpireCondition::kFieldExpireTimeLessThanInput:
+        if (old_expired_timestamp != NoExpireTime && expireat_ms > old_expired_timestamp) {
+          // LT set expiration only when the new expiration is
+          // less than current one.
+          results->push_back(FieldExpireResult::kExpireNotSet);
+          continue;
+        }
+        break;
+    }
+    // set new expired time
+    std::string expire_value;
+    PutFixed64(&expire_value, expireat_ms);
+    auto sub_expire_key = GetSubKeyExpireInternalKey(user_key, field, metadata.version);
+    s = batch->Put(sub_expire_key, expire_value);
+    if (!s.ok()) return s;
+    results->push_back(FieldExpireResult::kExpireSet);  // Expiration set successfully
+  }
+  return storage_->Write(ctx, storage_->DefaultWriteOptions(), batch->GetWriteBatch());
+}
+
+rocksdb::Status Hash::TTLFields(engine::Context &ctx, const Slice &user_key, const std::vector<Slice> &fields,
+                                std::vector<int64_t> *results) {
+  results->clear();
+  results->reserve(fields.size());
+
+  std::string ns_key = AppendNamespacePrefix(user_key);
+  HashMetadata metadata(false);
+  rocksdb::Status s = GetMetadata(ctx, ns_key, &metadata);
+  if (!s.ok()) {
+    // Key doesn't exist - all fields don't exist
+    results->assign(fields.size(), -2);
+    return s.IsNotFound() ? rocksdb::Status::OK() : s;
+  }
+  for (const auto &field : fields) {
+    std::string sub_key = InternalKey(ns_key, field, metadata.version, storage_->IsSlotIdEncoded()).Encode();
+    std::string value;
+    s = storage_->Get(ctx, ctx.GetReadOptions(), sub_key, &value);
+    if (s.IsNotFound()) {
+      results->push_back(-2);  // Field doesn't exist
+      continue;
+    }
+    if (!s.ok()) return s;
+
+    uint64_t expired_time = 0;
+    s = GetSubKeyExpireTimestampMS(ctx, user_key, field, metadata.version, &expired_time);
+    if (!s.ok() && !s.IsNotFound()) return s;
+    if (expired_time == NoExpireTime) {
+      results->push_back(-1);
+      continue;
+    }
+    auto ttl_ms = static_cast<int64_t>(expired_time);
+    results->push_back(ttl_ms > 0 ? ttl_ms : -2);
+  }
+  return rocksdb::Status::OK();
+}
+
+rocksdb::Status Hash::PersistFields(engine::Context &ctx, const Slice &user_key, const std::vector<Slice> &fields,
+                                    std::vector<FieldPersistResult> *results) {
+  results->clear();
+  results->reserve(fields.size());
+
+  std::string ns_key = AppendNamespacePrefix(user_key);
+  HashMetadata metadata(false);
+  rocksdb::Status s = GetMetadata(ctx, ns_key, &metadata);
+  if (!s.ok()) {
+    // Key doesn't exist - all fields don't exist
+    results->assign(fields.size(), FieldPersistResult::kFieldNotFound);
+    return s.IsNotFound() ? rocksdb::Status::OK() : s;
+  }
+
+  auto batch = storage_->GetWriteBatchBase();
+  WriteBatchLogData log_data(kRedisHash);
+  s = batch->PutLogData(log_data.Encode());
+  if (!s.ok()) return s;
+
+  bool has_updates = false;
+  for (const auto &field : fields) {
+    std::string sub_key = InternalKey(ns_key, field, metadata.version, storage_->IsSlotIdEncoded()).Encode();
+    std::string raw_value;
+    s = storage_->Get(ctx, ctx.GetReadOptions(), sub_key, &raw_value);
+    if (s.IsNotFound()) {
+      results->push_back(FieldPersistResult::kFieldNotFound);  // Field doesn't exist
+      continue;
+    }
+    if (!s.ok()) return s;
+    uint64_t old_expired_timestamp = 0;
+    s = GetSubKeyExpireTimestampMS(ctx, user_key, field, metadata.version, &old_expired_timestamp);
+    if (!s.ok() && !s.IsNotFound()) return s;
+    if (s.ok()) {
+      auto sub_key_expire = GetSubKeyExpireInternalKey(user_key, field, metadata.version);
+      s = batch->Delete(sub_key_expire);
+      if (!s.ok()) return s;
+    }
+    has_updates = true;
+    if (old_expired_timestamp == NoExpireTime) {
+      results->push_back(FieldPersistResult::kNotVolatile);
+      continue;
+    } else if (old_expired_timestamp < util::GetTimeStampMS()) {
+      results->push_back(FieldPersistResult::kFieldNotFound);  // Expired treat as non-existent
+      continue;
+    }
+    results->push_back(FieldPersistResult::kPersisted);  // Expiration removed successfully
+  }
+
+  if (has_updates) {
+    return storage_->Write(ctx, storage_->DefaultWriteOptions(), batch->GetWriteBatch());
+  }
+  return rocksdb::Status::OK();
+}
+
+rocksdb::Status Hash::MSetEx(engine::Context &ctx, const Slice &user_key, const std::vector<FieldValue> &field_values,
+                             const HSetExParams &params, uint64_t *added_cnt) {
+  *added_cnt = 0;
+  std::string ns_key = AppendNamespacePrefix(user_key);
+
+  HashMetadata metadata;
+  rocksdb::Status s = GetMetadata(ctx, ns_key, &metadata);
+  if (!s.ok() && !s.IsNotFound()) return s;
+
+  uint64_t new_expire_at_ms = NoExpireTime;
+  auto current_time_ms = util::GetTimeStampMS();
+
+  switch (params.expire_params.option) {
+    case SetEXExpireOption::kNoExpire:
+      new_expire_at_ms = NoExpireTime;
+      break;
+    case SetEXExpireOption::kEX:  // seconds
+      new_expire_at_ms = current_time_ms + (params.expire_params.value * 1000);
+      break;
+    case SetEXExpireOption::kPX:  // milliseconds
+      new_expire_at_ms = current_time_ms + params.expire_params.value;
+      break;
+    case SetEXExpireOption::kEXAT:  // unix-time-seconds
+      new_expire_at_ms = params.expire_params.value * 1000;
+      break;
+    case SetEXExpireOption::kPXAT:  // unix-time-milliseconds
+      new_expire_at_ms = params.expire_params.value;
+      break;
+    case SetEXExpireOption::kKEEPTTL:
+      // Will handle per-field TTL preservation in the loop
+      break;
+  }
+
+  int added = 0;
+  auto batch = storage_->GetWriteBatchBase();
+  WriteBatchLogData log_data(kRedisHash);
+  s = batch->PutLogData(log_data.Encode());
+  if (!s.ok()) return s;
+
+  std::unordered_set<std::string_view> field_set;
+  std::vector<rocksdb::Slice> origin_keys;
+  std::vector<rocksdb::Slice> keys;
+  std::vector<std::string> keys_encoded;
+  std::vector<std::string_view> values;
+  keys.reserve(field_values.size());
+  values.reserve(field_values.size());
+
+  for (auto it = field_values.rbegin(); it != field_values.rend(); it++) {
+    if (!field_set.insert(it->field).second) {
+      continue;
+    }
+    origin_keys.emplace_back(it->field);
+    keys_encoded.push_back(InternalKey(ns_key, it->field, metadata.version, storage_->IsSlotIdEncoded()).Encode());
+    keys.emplace_back(keys_encoded.back());
+    values.emplace_back(it->value);
+  }
+
+  std::vector<rocksdb::PinnableSlice> values_vector(keys.size());
+  std::vector<rocksdb::Status> statuses_vector(keys.size());
+
+  rocksdb::ReadOptions read_options = ctx.DefaultMultiGetOptions();
+  storage_->MultiGet(ctx, read_options, storage_->GetDB()->DefaultColumnFamily(), keys.size(), keys.data(),
+                     values_vector.data(), statuses_vector.data());
+
+  std::vector<uint64_t> expire_ats(keys.size(), NoExpireTime);
+  std::vector<rocksdb::Status> expire_statuses(keys.size(), rocksdb::Status::OK());
+  MGetSubKeyExpireTimestampMS(ctx, user_key, origin_keys, metadata.version, &expire_ats, &expire_statuses);
+
+  for (size_t field_index = 0; field_index < keys.size(); field_index++) {
+    const rocksdb::Slice field_key = keys[field_index];
+    bool exists = false;
+
+    rocksdb::Status &expire_status = expire_statuses[field_index];
+    if (!expire_status.ok() && !expire_status.IsNotFound()) {
+      return expire_status;
+    }
+
+    uint64_t expire_at = expire_ats[field_index];
+    rocksdb::Status &field_status = statuses_vector[field_index];
+    if (!field_status.ok() && !field_status.IsNotFound()) {
+      return field_status;
+    }
+    if (field_status.ok()) {
+      // Field exists, and not expired
+      if (expire_at == NoExpireTime || expire_at > current_time_ms) {
+        exists = true;
+      }
+    }
+
+    // FNX means set only when field not exists
+    // skip if exists
+    if (params.condition == SetEXFieldCondition::kFNX && exists) {
+      continue;
+    }
+
+    // FXX means set only when all field exists
+    // any non-exists will abort the whole operation
+    if (params.condition == SetEXFieldCondition::kFXX && !exists) {
+      *added_cnt = 0;
+      return rocksdb::Status::OK();
+    }
+
+    if (!exists) {
+      added++;
+    }
+
+    s = batch->Put(field_key, values[field_index]);
+    if (!s.ok()) return s;
+
+    if (params.expire_params.option == SetEXExpireOption::kKEEPTTL) {
+      // do nothing just keep the ttl
+      continue;
+    }
+
+    auto sub_key_expire = GetSubKeyExpireInternalKey(user_key, origin_keys[field_index], metadata.version);
+    if (new_expire_at_ms != NoExpireTime) {
+      std::string expire_value;
+      PutFixed64(&expire_value, new_expire_at_ms);
+      s = batch->Put(sub_key_expire, expire_value);
+      if (!s.ok()) return s;
+    } else {
+      s = batch->Delete(sub_key_expire);
+      if (!s.ok()) return s;
+    }
+  }
+
+  if (added > 0) {
+    *added_cnt = added;
+    metadata.size += added;
+    std::string bytes;
+    metadata.Encode(&bytes);
+    s = batch->Put(metadata_cf_handle_, ns_key, bytes);
+    if (!s.ok()) return s;
+  }
+
+  return storage_->Write(ctx, storage_->DefaultWriteOptions(), batch->GetWriteBatch());
+}
 }  // namespace redis

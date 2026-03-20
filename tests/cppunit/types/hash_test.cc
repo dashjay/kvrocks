@@ -28,6 +28,7 @@
 
 #include "parse_util.h"
 #include "test_base.h"
+#include "time_util.h"
 #include "types/redis_hash.h"
 
 class RedisHashTest : public TestBase {
@@ -390,4 +391,487 @@ TEST_F(RedisHashTest, HRandField) {
   EXPECT_TRUE(s.ok() && fvs.size() == 0);
 
   s = hash_->Del(*ctx_, key_);
+}
+
+TEST_F(RedisHashTest, ExpireFields) {
+  uint64_t ret = 0;
+  // Set up some fields
+  for (size_t i = 0; i < fields_.size(); i++) {
+    auto s = hash_->Set(*ctx_, key_, fields_[i], values_[i], &ret);
+    EXPECT_TRUE(s.ok() && ret == 1);
+  }
+
+  // Expire two fields
+  std::vector<Slice> fields_to_expire = {fields_[0], fields_[1]};
+  std::vector<FieldExpireResult> results;
+  uint64_t expire_time = util::GetTimeStampMS() + 1 * 1000;  // 2000 ms
+  auto s = hash_->ExpireFields(*ctx_, key_, expire_time, fields_to_expire, &results,
+                               FieldExpireCondition::kFieldNoExpireCondition);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(results.size(), 2);
+  EXPECT_EQ(results[0], FieldExpireResult::kExpireSet);  // First field expired successfully
+  EXPECT_EQ(results[1], FieldExpireResult::kExpireSet);  // Second field expired successfully
+
+  // Try to expire non-existent field
+  std::vector<Slice> non_existent = {Slice("non_existent_field")};
+  results.clear();
+  s = hash_->ExpireFields(*ctx_, key_, expire_time, non_existent, &results);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(results[0], FieldExpireResult::kFieldNotFound);  // Field doesn't exist
+
+  // Wait for 2 keys expired
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+  std::string value;
+  s = hash_->Get(*ctx_, key_, fields_to_expire[0], &value);
+  EXPECT_TRUE(s.IsNotFound());
+
+  s = hash_->Del(*ctx_, key_);
+}
+
+TEST_F(RedisHashTest, ExpireFieldsWithConditions) {
+  uint64_t ret = 0;
+  // Set up some fields
+  for (size_t i = 0; i < fields_.size(); i++) {
+    auto s = hash_->Set(*ctx_, key_, fields_[i], values_[i], &ret);
+    EXPECT_TRUE(s.ok() && ret == 1);
+  }
+
+  // test condition NX
+  {
+    std::vector<Slice> fields_to_expire = {fields_[0]};
+    std::vector<FieldExpireResult> results;
+    uint64_t expire_time = util::GetTimeStampMS() + 60000;
+    auto s = hash_->ExpireFields(*ctx_, key_, expire_time, fields_to_expire, &results,
+                                 FieldExpireCondition::kFieldExpireTimeNotExists);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(results.size(), 1);
+    EXPECT_EQ(results[0], FieldExpireResult::kExpireSet);  // First field expired successfully
+
+    // Try to set expiration again with NX condition
+    results.clear();
+    s = hash_->ExpireFields(*ctx_, key_, expire_time + 60000, fields_to_expire, &results,
+                            FieldExpireCondition::kFieldExpireTimeNotExists);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(results.size(), 1);
+    EXPECT_EQ(results[0], FieldExpireResult::kExpireNotSet);  // Expiration not set
+  }
+
+  // test condition XX
+  {
+    std::vector<Slice> fields_to_expire = {fields_[1]};
+    std::vector<FieldExpireResult> results;
+    uint64_t expire_time = util::GetTimeStampMS() + 60000;
+    auto s = hash_->ExpireFields(*ctx_, key_, expire_time, fields_to_expire, &results,
+                                 FieldExpireCondition::kFieldExpireTimeExists);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(results.size(), 1);
+    EXPECT_EQ(results[0], FieldExpireResult::kExpireNotSet);  // Expiration not set
+
+    // Set expiration first
+    std::vector<Slice> first_field = {fields_[1]};
+    uint64_t first_expire_time = util::GetTimeStampMS() + 30000;  // 30 seconds
+    std::vector<FieldExpireResult> expire_results;
+    s = hash_->ExpireFields(*ctx_, key_, first_expire_time, first_field, &expire_results);
+    EXPECT_TRUE(s.ok());
+
+    results.clear();
+    s = hash_->ExpireFields(*ctx_, key_, expire_time + 60000, fields_to_expire, &results,
+                            FieldExpireCondition::kFieldExpireTimeExists);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(results.size(), 1);
+    EXPECT_EQ(results[0], FieldExpireResult::kExpireSet);
+  }
+
+  // test condition GT, LT
+  {
+    std::vector<Slice> fields_to_expire = {fields_[2]};
+    std::vector<FieldExpireResult> results;
+    uint64_t expire_time = util::GetTimeStampMS() + 60000;
+    auto s = hash_->ExpireFields(*ctx_, key_, expire_time, fields_to_expire, &results);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(results.size(), 1);
+    EXPECT_EQ(results[0], FieldExpireResult::kExpireSet);
+    // Now try to set expiration again with XX condition
+    results.clear();
+    s = hash_->ExpireFields(*ctx_, key_, expire_time - 1, fields_to_expire, &results,
+                            FieldExpireCondition::kFieldExpireTimeGreaterThanInput);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(results.size(), 1);
+    EXPECT_EQ(results[0], FieldExpireResult::kExpireNotSet);  // GT condition not met
+
+    results.clear();
+    s = hash_->ExpireFields(*ctx_, key_, expire_time + 80000, fields_to_expire, &results,
+                            FieldExpireCondition::kFieldExpireTimeGreaterThanInput);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(results.size(), 1);
+    EXPECT_EQ(results[0], FieldExpireResult::kExpireSet);
+
+    results.clear();
+    s = hash_->ExpireFields(*ctx_, key_, expire_time + 90000, fields_to_expire, &results,
+                            FieldExpireCondition::kFieldExpireTimeLessThanInput);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(results.size(), 1);
+    EXPECT_EQ(results[0], FieldExpireResult::kExpireNotSet);  // LT condition not met
+
+    results.clear();
+    s = hash_->ExpireFields(*ctx_, key_, expire_time + 10000, fields_to_expire, &results,
+                            FieldExpireCondition::kFieldExpireTimeLessThanInput);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(results.size(), 1);
+    EXPECT_EQ(results[0], FieldExpireResult::kExpireSet);
+  }
+
+  auto s = hash_->Del(*ctx_, key_);
+  EXPECT_TRUE(s.ok());
+}
+
+TEST_F(RedisHashTest, TTLFields) {
+  uint64_t ret = 0;
+  // Set up some fields
+  for (size_t i = 0; i < fields_.size(); i++) {
+    auto s = hash_->Set(*ctx_, key_, fields_[i], values_[i], &ret);
+    EXPECT_TRUE(s.ok() && ret == 1);
+  }
+
+  // Get TTL for fields without expiration
+  std::vector<int64_t> results;
+  auto s = hash_->TTLFields(*ctx_, key_, fields_, &results);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(results.size(), fields_.size());
+  for (const auto &ttl : results) {
+    EXPECT_EQ(ttl, -1);  // No TTL set
+  }
+
+  // Set expiration on first field
+  std::vector<Slice> first_field = {fields_[0]};
+  uint64_t expire_time = util::GetTimeStampMS() + 30000;  // 30 seconds
+  std::vector<FieldExpireResult> expire_results;
+  s = hash_->ExpireFields(*ctx_, key_, expire_time, first_field, &expire_results);
+  EXPECT_TRUE(s.ok());
+
+  // Get TTL again
+  results.clear();
+  s = hash_->TTLFields(*ctx_, key_, fields_, &results);
+  EXPECT_TRUE(s.ok());
+  EXPECT_GE(results[0] - util::GetTimeStampMS(), 29000);  // Should be around 30 seconds
+  EXPECT_LE(results[0] - util::GetTimeStampMS(), 31000);
+  EXPECT_EQ(results[1], -1);  // No TTL
+  EXPECT_EQ(results[2], -1);  // No TTL
+
+  // Get TTL for non-existent field
+  std::vector<Slice> non_existent = {Slice("non_existent_field")};
+  results.clear();
+  s = hash_->TTLFields(*ctx_, key_, non_existent, &results);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(results[0], -2);  // Field doesn't exist
+
+  s = hash_->Del(*ctx_, key_);
+}
+
+TEST_F(RedisHashTest, PersistFields) {
+  uint64_t ret = 0;
+  // Set up some fields
+  for (size_t i = 0; i < fields_.size(); i++) {
+    auto s = hash_->Set(*ctx_, key_, fields_[i], values_[i], &ret);
+    EXPECT_TRUE(s.ok() && ret == 1);
+  }
+
+  // Set expiration on first two fields
+  std::vector<Slice> fields_to_expire = {fields_[0], fields_[1]};
+  std::vector<FieldExpireResult> expire_results;
+  uint64_t expire_time = util::GetTimeStampMS() + 60000;
+  auto s = hash_->ExpireFields(*ctx_, key_, expire_time, fields_to_expire, &expire_results);
+  EXPECT_TRUE(s.ok());
+
+  // Persist the first field
+  std::vector<Slice> first_field = {fields_[0]};
+  std::vector<FieldPersistResult> persist_results;
+  s = hash_->PersistFields(*ctx_, key_, first_field, &persist_results);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(persist_results.size(), 1);
+  EXPECT_EQ(persist_results[0], FieldPersistResult::kPersisted);  // Expiration removed
+
+  // Check TTL - should be -1 now
+  std::vector<int64_t> ttl_results;
+  s = hash_->TTLFields(*ctx_, key_, first_field, &ttl_results);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(ttl_results[0], -1);
+
+  // Try to persist a field without TTL
+  std::vector<Slice> third_field = {fields_[2]};
+  persist_results.clear();
+  s = hash_->PersistFields(*ctx_, key_, third_field, &persist_results);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(persist_results[0], FieldPersistResult::kNotVolatile);  // Field exists but has no TTL
+
+  // Try to persist non-existent field
+  std::vector<Slice> non_existent = {Slice("non_existent_field")};
+  persist_results.clear();
+  s = hash_->PersistFields(*ctx_, key_, non_existent, &persist_results);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(persist_results[0], FieldPersistResult::kFieldNotFound);  // Field doesn't exist
+
+  s = hash_->Del(*ctx_, key_);
+}
+
+TEST_F(RedisHashTest, HSetEx) {
+  uint64_t ret = 0;
+
+  // Test 1: HSetEx with kNoCondition and kNoExpire
+  {
+    std::vector<FieldValue> fvs = {{"field1", "value1"}, {"field2", "value2"}};
+    HSetExParams params;
+    params.condition = SetEXFieldCondition::kNoCondition;
+    params.expire_params.option = SetEXExpireOption::kNoExpire;
+
+    auto s = hash_->MSetEx(*ctx_, key_, fvs, params, &ret);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(ret, 2);
+
+    std::string value;
+    s = hash_->Get(*ctx_, key_, "field1", &value);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(value, "value1");
+  }
+
+  // Test 2: HSetEx with kFNX - should not update existing field
+  {
+    std::vector<FieldValue> fvs = {{"field1", "updated_value1"}, {"field3", "value3"}};
+    HSetExParams params;
+    params.condition = SetEXFieldCondition::kFNX;
+    params.expire_params.option = SetEXExpireOption::kNoExpire;
+
+    auto s = hash_->MSetEx(*ctx_, key_, fvs, params, &ret);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(ret, 1);  // Only field3 is added
+
+    std::string value;
+    s = hash_->Get(*ctx_, key_, "field1", &value);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(value, "value1");  // field1 should not be updated
+  }
+
+  // Test 3: HSetEx with kFXX - should only update existing fields
+  {
+    std::vector<FieldValue> fvs = {{"field1", "new_value1"}, {"field4", "value4"}};
+    HSetExParams params;
+    params.condition = SetEXFieldCondition::kFXX;
+    params.expire_params.option = SetEXExpireOption::kNoExpire;
+
+    auto s = hash_->MSetEx(*ctx_, key_, fvs, params, &ret);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(ret, 0);  // field1 exists but not counted as added, field4 skipped
+
+    std::string value;
+    s = hash_->Get(*ctx_, key_, "field1", &value);
+    EXPECT_TRUE(s.ok());
+    EXPECT_NE(value, "new_value1");  // field1 should not be updated
+
+    s = hash_->Get(*ctx_, key_, "field4", &value);
+    EXPECT_TRUE(s.IsNotFound());  // field4 should not be added
+  }
+
+  auto s = hash_->Del(*ctx_, key_);
+  ASSERT_TRUE(s.ok());
+  // Test 4: HSetEx with kEX (seconds expiration)
+  {
+    std::vector<FieldValue> fvs = {{"field_ex", "value_ex"}};
+    HSetExParams params;
+    params.condition = SetEXFieldCondition::kNoCondition;
+    params.expire_params.option = SetEXExpireOption::kEX;
+    params.expire_params.value = 2;  // 2 seconds
+
+    auto s = hash_->MSetEx(*ctx_, key_, fvs, params, &ret);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(ret, 1);
+
+    std::string value;
+    s = hash_->Get(*ctx_, key_, "field_ex", &value);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(value, "value_ex");
+
+    // Wait for expiration
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    s = hash_->Get(*ctx_, key_, "field_ex", &value);
+    EXPECT_TRUE(s.IsNotFound());  // Should be expired
+  }
+
+  s = hash_->Del(*ctx_, key_);
+  ASSERT_TRUE(s.ok());
+  // Test 5: HSetEx with kPX (milliseconds expiration)
+  {
+    std::vector<FieldValue> fvs = {{"field_px", "value_px"}};
+    HSetExParams params;
+    params.condition = SetEXFieldCondition::kNoCondition;
+    params.expire_params.option = SetEXExpireOption::kPX;
+    params.expire_params.value = 1500;  // 1500 milliseconds
+
+    auto s = hash_->MSetEx(*ctx_, key_, fvs, params, &ret);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(ret, 1);
+
+    std::string value;
+    s = hash_->Get(*ctx_, key_, "field_px", &value);
+    EXPECT_TRUE(s.ok());
+
+    // Wait for expiration
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    s = hash_->Get(*ctx_, key_, "field_px", &value);
+    EXPECT_TRUE(s.IsNotFound());  // Should be expired
+  }
+
+  s = hash_->Del(*ctx_, key_);
+  ASSERT_TRUE(s.ok());
+  // Test 6: HSetEx with kEXAT (Unix timestamp in seconds)
+  {
+    std::vector<FieldValue> fvs = {{"field_exat", "value_exat"}};
+    HSetExParams params;
+    params.condition = SetEXFieldCondition::kNoCondition;
+    params.expire_params.option = SetEXExpireOption::kEXAT;
+    params.expire_params.value = (util::GetTimeStampMS() + 2000) / 1000;  // 2 seconds from now
+
+    auto s = hash_->MSetEx(*ctx_, key_, fvs, params, &ret);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(ret, 1);
+
+    std::string value;
+    s = hash_->Get(*ctx_, key_, "field_exat", &value);
+    EXPECT_TRUE(s.ok());
+
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    s = hash_->Get(*ctx_, key_, "field_exat", &value);
+    EXPECT_TRUE(s.IsNotFound());  // Should be expired
+  }
+
+  s = hash_->Del(*ctx_, key_);
+  ASSERT_TRUE(s.ok());
+  // Test 7: HSetEx with kPXAT (Unix timestamp in milliseconds)
+  {
+    std::vector<FieldValue> fvs = {{"field_pxat", "value_pxat"}};
+    HSetExParams params;
+    params.condition = SetEXFieldCondition::kNoCondition;
+    params.expire_params.option = SetEXExpireOption::kPXAT;
+    params.expire_params.value = util::GetTimeStampMS() + 1500;  // 1.5 seconds from now
+
+    auto s = hash_->MSetEx(*ctx_, key_, fvs, params, &ret);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(ret, 1);
+
+    std::string value;
+    s = hash_->Get(*ctx_, key_, "field_pxat", &value);
+    EXPECT_TRUE(s.ok());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    s = hash_->Get(*ctx_, key_, "field_pxat", &value);
+    EXPECT_TRUE(s.IsNotFound());  // Should be expired
+  }
+
+  s = hash_->Del(*ctx_, key_);
+  ASSERT_TRUE(s.ok());
+  // Test 8: HSetEx with kKEEPTTL - preserve existing TTL
+  {
+    // First, set a field with expiration
+    std::vector<FieldValue> fvs = {{"field_ttl", "value1"}};
+    HSetExParams params;
+    params.condition = SetEXFieldCondition::kNoCondition;
+    params.expire_params.option = SetEXExpireOption::kEX;
+    params.expire_params.value = 10;  // 10 seconds
+
+    auto s = hash_->MSetEx(*ctx_, key_, fvs, params, &ret);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(ret, 1);
+
+    // Now update with KEEPTTL
+    std::vector<FieldValue> update_fvs = {{"field_ttl", "value2"}};
+    HSetExParams keepttl_params;
+    keepttl_params.condition = SetEXFieldCondition::kNoCondition;
+    keepttl_params.expire_params.option = SetEXExpireOption::kKEEPTTL;
+
+    s = hash_->MSetEx(*ctx_, key_, update_fvs, keepttl_params, &ret);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(ret, 0);  // Not added, just updated
+
+    std::string value;
+    s = hash_->Get(*ctx_, key_, "field_ttl", &value);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(value, "value2");
+
+    // Check TTL is still set
+    std::vector<int64_t> ttl_results;
+    std::vector<Slice> fields = {Slice("field_ttl")};
+    s = hash_->TTLFields(*ctx_, key_, fields, &ttl_results);
+    EXPECT_TRUE(s.ok());
+    EXPECT_GE(ttl_results[0] - util::GetTimeStampMS(), 8000);  // Should be around 10 seconds
+  }
+
+  s = hash_->Del(*ctx_, key_);
+  ASSERT_TRUE(s.ok());
+  // Test 9: HSetEx with expired field and kFNX - should be treated as not existing
+  {
+    // Set a field with short expiration
+    std::vector<FieldValue> fvs = {{"expired_field", "value"}};
+    HSetExParams params;
+    params.condition = SetEXFieldCondition::kNoCondition;
+    params.expire_params.option = SetEXExpireOption::kPX;
+    params.expire_params.value = 500;  // 0.5 seconds
+
+    auto s = hash_->MSetEx(*ctx_, key_, fvs, params, &ret);
+    EXPECT_TRUE(s.ok());
+
+    // Wait for expiration
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+
+    // Try to set with FNX - should succeed because field is expired (treated as not existing)
+    std::vector<FieldValue> new_fvs = {{"expired_field", "new_value"}};
+    HSetExParams fnx_params;
+    fnx_params.condition = SetEXFieldCondition::kFNX;
+    fnx_params.expire_params.option = SetEXExpireOption::kNoExpire;
+
+    s = hash_->MSetEx(*ctx_, key_, new_fvs, fnx_params, &ret);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(ret, 1);
+
+    std::string value;
+    s = hash_->Get(*ctx_, key_, "expired_field", &value);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(value, "new_value");
+  }
+
+  s = hash_->Del(*ctx_, key_);
+  ASSERT_TRUE(s.ok());
+  // Test 10: HSetEx with multiple fields, some with condition
+  {
+    std::vector<FieldValue> initial = {{"f1", "v1"}, {"f2", "v2"}};
+    HSetExParams init_params;
+    init_params.condition = SetEXFieldCondition::kNoCondition;
+    init_params.expire_params.option = SetEXExpireOption::kNoExpire;
+
+    auto s = hash_->MSetEx(*ctx_, key_, initial, init_params, &ret);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(ret, 2);
+
+    // Now try mixed operations with FXX
+    std::vector<FieldValue> mixed = {{"f1", "v1_updated"}, {"f3", "v3"}};
+    HSetExParams fxx_params;
+    fxx_params.condition = SetEXFieldCondition::kFXX;
+    fxx_params.expire_params.option = SetEXExpireOption::kEX;
+    fxx_params.expire_params.value = 60;
+
+    s = hash_->MSetEx(*ctx_, key_, mixed, fxx_params, &ret);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(ret, 0);  // no one updated due to f3 not existing
+
+    std::string value;
+    s = hash_->Get(*ctx_, key_, "f1", &value);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(value, "v1");
+
+    s = hash_->Get(*ctx_, key_, "f3", &value);
+    EXPECT_TRUE(s.IsNotFound());  // f3 was not added
+  }
+
+  s = hash_->Del(*ctx_, key_);
+  ASSERT_TRUE(s.ok());
 }
